@@ -1,43 +1,27 @@
-package eventsource
+package main
+
 import (
-	"database/sql"
 	"encoding/json"
-	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-	"github.com/lib/pq"
+	_ "github.com/lib/pq"
 )
 
-const offset = 10
-const tempUUID = 11111111-1111-1111-1111-111111111111
+const insertEvent string = "INSERT INTO event (id, data,time) VALUES($1,$2,$3) RETURNING version;"
+const selectVerEvent string = "SELECT  version, id, data, time FROM event WHERE version=$1;"
+const selectTimeEvent string = "SELECT  version, id, data, time  FROM event WHERE time=$1;"
+const selectRangVerEvent string = "SELECT version, id, data, time  FROM event WHERE (id=$1) AND (version>=$2) AND (version<=$3);"
+const selectRangTimeEvent string = "SELECT version, id, data, time FROM event WHERE (id=$1) AND (time>=$2) AND (time<=$3);"
 
-type EventStoreDb struct {
-	db := pg.Connect(pgOptions())
-defer db.Close()
-}
+func (event *EventStoreDb) InsertEventWithoutID(w http.ResponseWriter, r *http.Request) {
+	var ev Eventstore
 
-func newEventStoreDb() *EventStoreDb {
-	
-	database, err := sql.Open("postgres", "user=customer password=myorder dbname=eventstore host=localhost ")
-
-	if err != nil {
-		log.Println(err)
-	}
-
-	return &EventStoreDb{
-		db: database,
-	}
-}
-
-func (event *EventStoreDb) AddEvent(w http.ResponseWriter, r *http.Request) {
-	var event EventStore
-
-	err := json.NewDecoder(r.Body).Decode(&event)
+	err := json.NewDecoder(r.Body).Decode(&ev.Data)
 	if err != nil {
 		log.Println(err)
 		w.WriteHeader(http.StatusBadRequest)
@@ -45,235 +29,222 @@ func (event *EventStoreDb) AddEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	event.id = uuid.New().String()
+	ev.Id = uuid.New().String()
 
-	_, err = event.db.Exec(
-		"CREATE TABLE ?
- (
-	id uuid NOT NULL,
-	version bigserial NOT NULL , 
-	data json NOT NULL,
-    time timestamp with time zone NOT NULL DEFAULT now(),
-  CONSTRAINT event_pkey PRIMARY KEY (version)
-);", event.id
-	)
+	e, err := ev.Data.Value()
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 
+	ev.Timestamp = Timestamp()
+
+	err = event.db.QueryRow(insertEvent, ev.Id, e, ev.Timestamp).Scan(&ev.Version)
 	if err != nil {
 		log.Println(err)
 		return
 	}
 
-	__, err = event.db.Exec("INSERT INTO ? (ID,Data) VALUES(?,?)",
-		event.id, event.id, event.data)
-	if err != nil {
-		log.Println(err)
-		return
-	}
+	Lastversion(ev.Id, ev.Version)
 
 	w.WriteHeader(http.StatusOK)
 }
 func (event *EventStoreDb) InsertEvent(w http.ResponseWriter, r *http.Request) {
-	var event EventStore
+	var ev Eventstore
 
-	err := json.NewDecoder(r.Body).Decode(&event)
+	err := json.NewDecoder(r.Body).Decode(&ev.Data)
 	if err != nil {
 		log.Println(err)
 		w.WriteHeader(http.StatusBadRequest)
 
 		return
 	}
+	params := mux.Vars(r)
 
-	
-	__, err = event.db.Exec("INSERT INTO ? (ID,Data) VALUES(?,?)",
-		event.id, event.id, event.data)
+	_, err = uuid.Parse(params["ID"])
+	if err == nil {
+		ev.Id = params["ID"]
+
+	} else {
+
+		log.Println(err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+
+	}
+
+	e, err := ev.Data.Value()
 	if err != nil {
 		log.Println(err)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
+	ev.Timestamp = Timestamp()
+	err = event.db.QueryRow(insertEvent, ev.Id, e, ev.Timestamp).Scan(&ev.Version)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	Lastversion(ev.Id, ev.Version)
 	w.WriteHeader(http.StatusOK)
 }
 
-
-
-
 func (event *EventStoreDb) GetEventByVersion(w http.ResponseWriter, r *http.Request) {
-	var ev EventStore
+	var ev Eventstore
 
 	params := mux.Vars(r)
+	ver, err := strconv.Atoi(params["VERSION"])
 
-	row := event.db.QueryRow("SELECT * FROM ? WHERE version=?",params["id"] params["version"])
-
-	err := row.Scan(&ev.version,&ev.id, &ev.data, &ev.timestamp)
 	if err != nil {
-		log.Println(err)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	err = json.NewEncoder(w).Encode(h)
-	if err != nil {
-		log.Println(err.Error())
-	}
-}
+	row := event.db.QueryRow(selectVerEvent, ver)
 
-func (event *EventStoreDb) GetGetEventByTimestamp(w http.ResponseWriter, r *http.Request) {
-	var ev EventStore
-
-	params := mux.Vars(r)
-
-	row := event.db.QueryRow("SELECT * FROM ? WHERE timestamp=?",params["id"] params["timestamp"])
-
-	err := row.Scan(&ev.version,&ev.ID, &ev.data, &ev.timestamp)
+	err = row.Scan(&ev.Version, &ev.Id, &ev.Data, &ev.Timestamp)
 	if err != nil {
 		log.Println(err)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
-	err = json.NewEncoder(w).Encode(h)
+	err = json.NewEncoder(w).Encode(ev)
 	if err != nil {
 		log.Println(err.Error())
 	}
 }
 func (event *EventStoreDb) GetEventByRangeOfVersion(w http.ResponseWriter, r *http.Request) {
-	var events []EventStore
+	var events []Eventstore
 
 	params := mux.Vars(r)
-	page, err := strconv.Atoi(params["PAGE"])
 
-	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		return
+	versionMin := (r.FormValue("vm"))
+	if versionMin == "0" {
+		versionMin = "1"
 	}
 
-	page--
+	versionMax := r.FormValue("vM")
+	if versionMax == "0" {
+		versionMax = string(LastVersionStore[params["ID"]])
+	}
 
-	offsetnum := page * offset
-
-	rows, err := event.db.Query("SELECT * FROM ? WHERE version BETWEEN ? AND ? LIMIT ?,?", 
-	params["id"], params["versionMin"], param["versionMax"], offsetnum, offset)
+	rows, err := event.db.Query(selectRangVerEvent, params["ID"], versionMin, versionMax)
 	if err != nil {
 		log.Println(err)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
+	defer rows.Close()
+
 	for rows.Next() {
-		var  ev EventStore
-		err = rows.Scan(&ev.id, &ev.version, &ev.data, &h.timestamp)
+		var ev Eventstore
+		err = rows.Scan(&ev.Version, &ev.Id, &ev.Data, &ev.Timestamp)
 
 		if err != nil {
 			log.Println(err)
-			continue
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 
-		if err = rows.Err(); err != nil {
-			log.Println(err)
-			continue
-		}
-
-		event = append(event, h)
+		events = append(events, ev)
+	}
+	err = rows.Err()
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
 
-	err = json.NewEncoder(w).Encode(event)
+	err = json.NewEncoder(w).Encode(events)
 	if err != nil {
 		log.Println(err)
 	}
 }
-func (event *EventStoreDb) GetEventByRangeOfVersion(w http.ResponseWriter, r *http.Request) {
-	var events []EventStore
 
-	params := mux.Vars(r)
-	page, err := strconv.Atoi(params["PAGE"])
+func (event *EventStoreDb) GetEventByTimestamp(w http.ResponseWriter, r *http.Request) {
+	var ev Eventstore
+	var time = ""
 
+	err := json.NewDecoder(r.Body).Decode(&time)
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
+		log.Println(err)
+
 		return
 	}
 
-	page--
+	row := event.db.QueryRow(selectTimeEvent, &time)
 
-	offsetnum := page * offset
-
-	rows, err := event.db.Query("SELECT * FROM ? WHERE version BETWEEN ? AND ? LIMIT ?,?", 
-	params["id"], params["versionMin"], param["versionMax"], offsetnum, offset)
+	err = row.Scan(&ev.Version, &ev.Id, &ev.Data, &ev.Timestamp)
 	if err != nil {
 		log.Println(err)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	for rows.Next() {
-		var  ev EventStore
-		err = rows.Scan(&ev.id, &ev.version, &ev.data, &ev.timestamp)
-
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-
-		if err = rows.Err(); err != nil {
-			log.Println(err)
-			continue
-		}
-
-		event = append(event, h)
-	}
-
-	err = json.NewEncoder(w).Encode(event)
+	err = json.NewEncoder(w).Encode(ev)
 	if err != nil {
-		log.Println(err)
+		log.Println(err.Error())
 	}
 }
 
 func (event *EventStoreDb) GetEventByRangeOfTimestamp(w http.ResponseWriter, r *http.Request) {
-	var events []EventStore
 
-	params := mux.Vars(r)
-	page, err := strconv.Atoi(params["PAGE"])
+	var events []Eventstore
 
+	type Times struct {
+		TimesMin string `json:"timemin"`
+		TimesMax string `json:"timemax"`
+	}
+	b, err := ioutil.ReadAll(r.Body)
+	defer r.Body.Close()
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
+		http.Error(w, err.Error(), 500)
 		return
 	}
 
-	page--
+	var t Times
+	err = json.Unmarshal(b, &t)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	params := mux.Vars(r)
 
-	offsetnum := page * offset
-
-	rows, err := event.db.Query("SELECT * FROM ? WHERE time BETWEEN ? AND ? LIMIT ?,?", 
-	params["id"], params["timeMin"], param["timeMax"], offsetnum, offset)
+	rows, err := event.db.Query(selectRangTimeEvent, params["ID"], t.TimesMin, t.TimesMax)
 	if err != nil {
 		log.Println(err)
 		return
 	}
 
+	defer rows.Close()
+
 	for rows.Next() {
-		var  ev EventStore
-		err = rows.Scan(&ev.id, &ev.version, &ev.data, &ev.timestamp)
+		var ev Eventstore
+		err = rows.Scan(&ev.Version, &ev.Id, &ev.Data, &ev.Timestamp)
 
 		if err != nil {
 			log.Println(err)
-			continue
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 
-		if err = rows.Err(); err != nil {
-			log.Println(err)
-			continue
-		}
-
-		event = append(event, h)
+		events = append(events, ev)
+	}
+	err = rows.Err()
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
 
-	err = json.NewEncoder(w).Encode(event)
+	err = json.NewEncoder(w).Encode(events)
 	if err != nil {
 		log.Println(err)
 	}
 }
-
-
-
-
-
-
-
-
-
-
