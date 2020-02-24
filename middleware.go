@@ -1,4 +1,4 @@
-package eventsource
+package main
 
 import "net/http"
 
