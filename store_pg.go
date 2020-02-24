@@ -48,7 +48,12 @@ func (event *EventStoreDb) InsertEventWithoutID(w http.ResponseWriter, r *http.R
 
 	Lastversion(ev.Id, ev.Version)
 
-	w.WriteHeader(http.StatusOK)
+	/*err = json.NewEncoder(w).Encode(ev.Id)
+	if err != nil {
+		log.Println(err.Error())
+	}*/
+
+	w.Write([]byte(ev.Id))
 }
 func (event *EventStoreDb) InsertEvent(w http.ResponseWriter, r *http.Request) {
 	var ev Eventstore
